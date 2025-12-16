@@ -22,9 +22,9 @@ if (!$conn) {
     exit;
 }
 
-$query = "SELECT id, comment_text, created_at 
+$query = "SELECT id, comment_text, UNIX_TIMESTAMP(created_at) as created_at_utc, created_at, status
           FROM `{$table_prefix}comments` 
-          WHERE report_id = ? 
+          WHERE report_id = ? AND status = 'approved'
           ORDER BY created_at ASC";
 
 $stmt = $conn->prepare($query);
@@ -34,10 +34,13 @@ $result = $stmt->get_result();
 
 $comments = [];
 while ($row = $result->fetch_assoc()) {
+    // Convert MySQL timestamp to UTC ISO 8601 format using UNIX_TIMESTAMP (always returns UTC)
+    $createdAt = gmdate('Y-m-d\TH:i:s\Z', intval($row['created_at_utc']));
+    
     $comments[] = [
         'id' => intval($row['id']),
         'comment_text' => $row['comment_text'],
-        'created_at' => $row['created_at']
+        'created_at' => $createdAt
     ];
 }
 

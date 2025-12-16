@@ -16,6 +16,9 @@ require_once '../config/database.php';
 
 $table_prefix = DB_TABLE_PREFIX;
 
+// Set timezone to UTC to ensure consistent timestamp handling
+date_default_timezone_set('UTC');
+
 // Get parameters
 $latitude = isset($_GET['lat']) ? floatval($_GET['lat']) : null;
 $longitude = isset($_GET['lng']) ? floatval($_GET['lng']) : null;
@@ -88,7 +91,8 @@ if ($latitude !== null && $longitude !== null) {
     if ($use_24_hour_filter) {
         // Show only reports from last 24 hours (using MySQL DATE_SUB)
         // Exclude reports older than 24 hours (created_at must be >= 24 hours ago)
-        $query = "SELECT id, latitude, longitude, condition_type, location_type, submitter_name, created_at,
+        $query = "SELECT id, latitude, longitude, condition_type, location_type, submitter_name, intersection, 
+                  UNIX_TIMESTAMP(created_at) as created_at_utc, created_at,
                   (6371 * acos(cos(radians(?)) * cos(radians(latitude)) * 
                   cos(radians(longitude) - radians(?)) + sin(radians(?)) * 
                   sin(radians(latitude)))) AS distance
@@ -111,7 +115,8 @@ if ($latitude !== null && $longitude !== null) {
         $stmt->bind_param("ddddi", $latitude, $longitude, $latitude, $radius, $limit);
     } else {
         // Show most recent reports regardless of age
-        $query = "SELECT id, latitude, longitude, condition_type, location_type, submitter_name, created_at,
+        $query = "SELECT id, latitude, longitude, condition_type, location_type, submitter_name, intersection, 
+                  UNIX_TIMESTAMP(created_at) as created_at_utc, created_at,
                   (6371 * acos(cos(radians(?)) * cos(radians(latitude)) * 
                   cos(radians(longitude) - radians(?)) + sin(radians(?)) * 
                   sin(radians(latitude)))) AS distance
@@ -137,7 +142,8 @@ if ($latitude !== null && $longitude !== null) {
     if ($use_24_hour_filter) {
         // Show only reports from last 24 hours (using MySQL DATE_SUB)
         // Exclude reports older than 24 hours (created_at must be >= 24 hours ago)
-        $query = "SELECT id, latitude, longitude, condition_type, location_type, submitter_name, created_at
+        $query = "SELECT id, latitude, longitude, condition_type, location_type, submitter_name, intersection, 
+                  UNIX_TIMESTAMP(created_at) as created_at_utc, created_at
                   FROM `{$table_prefix}reports`
                   WHERE created_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
                   ORDER BY created_at DESC
@@ -155,7 +161,8 @@ if ($latitude !== null && $longitude !== null) {
         $stmt->bind_param("i", $limit);
     } else {
         // Show most recent reports regardless of age
-        $query = "SELECT id, latitude, longitude, condition_type, location_type, submitter_name, created_at
+        $query = "SELECT id, latitude, longitude, condition_type, location_type, submitter_name, intersection, 
+                  UNIX_TIMESTAMP(created_at) as created_at_utc, created_at
                   FROM `{$table_prefix}reports`
                   ORDER BY created_at DESC
                   LIMIT ?";
@@ -198,6 +205,10 @@ if (!$result) {
 $reports = [];
 $twenty_four_hours_ago_timestamp = time() - (24 * 60 * 60); // 24 hours ago in Unix timestamp
 
+// Check if status column exists (for backward compatibility) - check once before the loop
+$check_status_column = $conn->query("SHOW COLUMNS FROM `{$table_prefix}comments` LIKE 'status'");
+$has_status_column = ($check_status_column && $check_status_column->num_rows > 0);
+
 while ($row = $result->fetch_assoc()) {
     // If strict_24h is enabled, filter out reports older than 24 hours in PHP as well (double-check)
     if ($strict_24h) {
@@ -232,9 +243,15 @@ while ($row = $result->fetch_assoc()) {
         $vote_stmt->close();
     }
     
-    // Get comment count (with error handling in case comments table doesn't exist)
+    // Get comment count (only approved comments, with error handling in case comments table doesn't exist)
     $comment_count = 0;
-    $comment_query = "SELECT COUNT(*) as comment_count FROM `{$table_prefix}comments` WHERE report_id = ?";
+    if ($has_status_column) {
+        $comment_query = "SELECT COUNT(*) as comment_count FROM `{$table_prefix}comments` WHERE report_id = ? AND status = 'approved'";
+    } else {
+        // Fallback for databases without status column (count all comments)
+        $comment_query = "SELECT COUNT(*) as comment_count FROM `{$table_prefix}comments` WHERE report_id = ?";
+    }
+    
     $comment_stmt = $conn->prepare($comment_query);
     if ($comment_stmt) {
         $comment_stmt->bind_param("i", $report_id);
@@ -248,8 +265,9 @@ while ($row = $result->fetch_assoc()) {
         $comment_stmt->close();
     }
     
-    // Get nearest intersection (async - will be fetched by JavaScript)
-    // We'll add this in the frontend to avoid blocking the API response
+    // Convert MySQL timestamp to UTC ISO 8601 format using UNIX_TIMESTAMP (always returns UTC)
+    // UNIX_TIMESTAMP returns UTC seconds regardless of MySQL timezone settings
+    $createdAt = gmdate('Y-m-d\TH:i:s\Z', intval($row['created_at_utc']));
     
     $reports[] = [
         'id' => $report_id,
@@ -258,7 +276,8 @@ while ($row = $result->fetch_assoc()) {
         'condition_type' => $row['condition_type'],
         'location_type' => isset($row['location_type']) ? $row['location_type'] : 'road',
         'submitter_name' => $row['submitter_name'],
-        'created_at' => $row['created_at'],
+        'intersection' => isset($row['intersection']) ? $row['intersection'] : null,
+        'created_at' => $createdAt, // ISO 8601 UTC format: 'YYYY-MM-DDTHH:MM:SSZ'
         'upvotes' => $upvotes,
         'downvotes' => $downvotes,
         'comment_count' => $comment_count

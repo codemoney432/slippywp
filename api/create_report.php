@@ -14,6 +14,8 @@ header('Access-Control-Allow-Headers: Content-Type');
 ob_start();
 
 require_once '../config/database.php';
+require_once '../api/helpers/intersection_helper.php';
+require_once '../api/helpers/banned_words_helper.php';
 
 $table_prefix = DB_TABLE_PREFIX;
 
@@ -93,8 +95,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         exit;
     }
     
-    // Sanitize submitter name (limit to 25 characters)
+    // Sanitize and validate submitter name (limit to 25 characters)
     if ($submitter_name !== null) {
+        // Check for banned words before sanitizing
+        $bannedCheck = checkBannedWords($submitter_name);
+        if ($bannedCheck['contains_banned']) {
+            ob_clean();
+            http_response_code(400);
+            echo json_encode(['error' => 'Name contains inappropriate content']);
+            exit;
+        }
+        
         $submitter_name = htmlspecialchars($submitter_name, ENT_QUOTES, 'UTF-8');
         if (strlen($submitter_name) > 25) {
             $submitter_name = substr($submitter_name, 0, 25);
@@ -127,6 +138,38 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     
     if ($stmt->execute()) {
         $report_id = $conn->insert_id;
+        
+        // Try to fetch intersection once (non-blocking - don't delay report submission)
+        // If it fails, the cron job will retry later
+        try {
+            $intersection = fetchIntersection($latitude, $longitude);
+            // Function should always return something (address or coordinates), but check anyway
+            if ($intersection !== null && $intersection !== '') {
+                // Success - update the report immediately
+                $update_stmt = $conn->prepare("UPDATE `{$table_prefix}reports` SET intersection = ? WHERE id = ?");
+                if ($update_stmt) {
+                    $update_stmt->bind_param("si", $intersection, $report_id);
+                    if ($update_stmt->execute()) {
+                        // Successfully updated
+                        error_log("Report {$report_id}: Intersection updated successfully: {$intersection}");
+                    } else {
+                        // Update failed - log error but don't block report creation
+                        error_log("Report {$report_id}: Failed to update intersection - " . $update_stmt->error);
+                    }
+                    $update_stmt->close();
+                } else {
+                    error_log("Report {$report_id}: Failed to prepare intersection update - " . $conn->error);
+                }
+            } else {
+                // Intersection fetch returned null/empty - will be retried by cron
+                error_log("Report {$report_id}: Intersection fetch returned null/empty for lat={$latitude}, lng={$longitude}");
+            }
+        } catch (Exception $e) {
+            // Exception during intersection fetch - log but don't block report creation
+            error_log("Report {$report_id}: Exception during intersection fetch - " . $e->getMessage());
+        }
+        // If intersection fetch fails, report is still created successfully
+        // The cron job will retry up to 5 times every 5 minutes
         
         // Clear any unexpected output
         ob_clean();

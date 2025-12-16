@@ -17,6 +17,16 @@ require_once '../config/database.php';
 
 $table_prefix = DB_TABLE_PREFIX;
 
+// OpenAI API key configuration
+// Set this in your config/database.php or as environment variable
+if (!defined('OPENAI_API_KEY')) {
+    // Try to get from environment or config
+    $openai_key = getenv('OPENAI_API_KEY');
+    if ($openai_key) {
+        define('OPENAI_API_KEY', $openai_key);
+    }
+}
+
 // Cloudflare Turnstile configuration
 define('TURNSTILE_SITE_KEY', 'YOUR_SITE_KEY_HERE'); // Replace with your Turnstile site key
 define('TURNSTILE_SECRET_KEY', 'YOUR_SECRET_KEY_HERE'); // Replace with your Turnstile secret key
@@ -91,7 +101,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
     */
     
-    // Sanitize comment text
+    // Sanitize comment text (but keep original for moderation)
+    $original_comment_text = $comment_text;
     $comment_text = htmlspecialchars($comment_text, ENT_QUOTES, 'UTF-8');
     
     // Get IP address
@@ -125,8 +136,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
     $check_stmt->close();
     
-    // Insert comment
-    $stmt = $conn->prepare("INSERT INTO `{$table_prefix}comments` (report_id, comment_text, ip_address) VALUES (?, ?, ?)");
+    // Insert comment with 'pending' status (will be moderated by cron job)
+    $status = 'pending';
+    $stmt = $conn->prepare("INSERT INTO `{$table_prefix}comments` (report_id, comment_text, status, ip_address) VALUES (?, ?, ?, ?)");
     
     if (!$stmt) {
         ob_clean();
@@ -137,7 +149,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         exit;
     }
     
-    $stmt->bind_param("iss", $report_id, $comment_text, $ip_address);
+    $stmt->bind_param("isss", $report_id, $comment_text, $status, $ip_address);
     
     if ($stmt->execute()) {
         $comment_id = $conn->insert_id;
@@ -146,8 +158,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         echo json_encode([
             'success' => true,
             'id' => $comment_id,
-            'comment_text' => $comment_text,
-            'created_at' => date('Y-m-d H:i:s')
+            'status' => 'pending',
+            'message' => 'Comment has been submitted and is pending moderation'
         ]);
     } else {
         ob_clean();
