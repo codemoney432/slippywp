@@ -30,6 +30,9 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 }
 
+// Include cron job for intersection backfill
+require_once get_stylesheet_directory() . '/slippy-cron.php';
+
 
 
 global $wp_query;
@@ -73,14 +76,43 @@ function load_bootstrap_files() {
 	wp_register_script( 'leaflet-js',"https://unpkg.com/leaflet@1.9.4/dist/leaflet.js", array('jquery'), '1.0', true );
 
 	wp_enqueue_script('leaflet-js');
+	
+	// Load Google Places API if API key is configured (for faster autocomplete)
+	require_once ABSPATH . 'config/database.php';
+	if (defined('GOOGLE_PLACES_API_KEY') && !empty(GOOGLE_PLACES_API_KEY)) {
+		wp_enqueue_script('google-places', 'https://maps.googleapis.com/maps/api/js?key=' . GOOGLE_PLACES_API_KEY . '&libraries=places', array(), '1.0', true);
+	}
 
 	wp_register_script( 'slippy-js',get_site_url() . '/js/app.js', array('jquery'), '1.0', true );
+	
+	// Pass API key to JavaScript if available
+	$google_places_key = defined('GOOGLE_PLACES_API_KEY') ? GOOGLE_PLACES_API_KEY : '';
+	wp_localize_script('slippy-js', 'slippyConfig', array(
+		'googlePlacesApiKey' => $google_places_key
+	));
 
 	wp_enqueue_script('slippy-js');
 
 
 
 }
+
+$paragraph_text = "Report and view road conditions in your area. Find out about ice, slush, snow, and water hazards on roads and sidewalks near you.";
+
+function opengraph_description($desc) {
+	global $paragraph_text;
+    if (preg_match('/<p>(.*?)<\/p>/s', $paragraph_text, $pMatch)) {
+        $firstParagraphText = strip_tags($pMatch[1]);
+
+        if (preg_match('/^.*?[.!?](?=\s|$)/', $firstParagraphText, $sentenceMatch)) {
+            $paragraph_text = $sentenceMatch[0];
+        }
+    }
+	return str_replace("</p><p>"," ",str_replace("\"","",str_replace("&quot;","",$paragraph_text)));
+}
+
+add_filter( 'wpseo_metadesc', 'opengraph_description', 10, 1 );
+add_filter( 'wpseo_opengraph_desc', 'opengraph_description', 10, 1 );
 
 
 
@@ -216,15 +248,35 @@ get_header();
 
     <div class="container ">
 
-
+        <div class="slippy-description">
+           
+            <p><?= $paragraph_text ?></p>
+        </div>
 
         <div class="search-bar">
 
-            <input type="text" id="location-input" placeholder="Enter zip code or address">
+            <div class="location-input-wrapper">
+                <input type="text" id="location-input" placeholder="Enter zip code or address" autocomplete="off">
+                <div id="location-autocomplete" class="autocomplete-dropdown" style="display: none;"></div>
+                <div id="location-input-error" class="field-error" style="display: none;"></div>
+            </div>
 
-            <button id="search-btn">Search</button>
+            <button id="search-btn">
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" style="margin-right: 6px;">
+                    <path d="M7.333 12.667A5.333 5.333 0 1 0 7.333 2a5.333 5.333 0 0 0 0 10.667zM14 14l-3.867-3.867" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+                Search
+            </button>
 
-            <button id="use-location-btn">Use My Location</button>
+            <span class="or-divider">OR</span>
+
+            <button id="use-location-btn">
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" style="margin-right: 6px;">
+                    <path d="M8 1.333c-2.667 0-4.667 2-4.667 4.667 0 3.5 4.667 8 4.667 8s4.667-4.5 4.667-8c0-2.667-2-4.667-4.667-4.667z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="currentColor" fill-opacity="0.2"/>
+                    <circle cx="8" cy="6" r="1.5" fill="currentColor"/>
+                </svg>
+                Use My Location
+            </button>
 
         </div>
 
@@ -357,6 +409,8 @@ get_header();
                         <label for="submitter-name">Your Name (Optional, max 25 characters):</label>
 
                         <input type="text" id="submitter-name" placeholder="Enter your name" maxlength="25">
+                        
+                        <div id="submitter-name-error" class="field-error" style="display: none;"></div>
 
                     </div>
 
@@ -372,7 +426,7 @@ get_header();
 
                     </div>
 
-
+                    <div id="form-error" class="form-error" style="display: none;"></div>
 
                     <button type="submit" id="submit-btn" disabled>Submit Report</button>
 
@@ -397,14 +451,23 @@ get_header();
         </div>
 
 
-
-        <footer class="legal-disclaimer">
-
-            <p><strong>Legal Disclaimer:</strong> SlippyCheck recommends that you assess risks when walking, driving, biking, scooting, or using any other mode of transportation based on all information available to you, including but not limited to weather conditions, local advisories, and your own observations. The information provided on this platform is user-generated and may not be complete, accurate, or current. SlippyCheck does not guarantee the accuracy, reliability, or completeness of any information posted by users. We do not have perfect information about the status of roads and sidewalks you may travel on. Use of this service is at your own risk. SlippyCheck, its operators, and contributors are not liable for any injuries, damages, or losses that may result from your use of or reliance on information provided through this platform. Always exercise caution and use your best judgment when making travel decisions.</p>
-
-        </footer>
-
         
+
+        <!-- Success Modal -->
+
+        <div id="success-modal" class="modal" style="display: none;">
+
+            <div class="modal-content success-modal-content" style="text-align: center; padding: 40px; max-width: 400px;">
+
+                <div style="font-size: 48px; margin-bottom: 20px;">✅</div>
+
+                <h2 style="color: var(--success-green, #15803d); margin-bottom: 15px;">Report Submitted!</h2>
+
+                <p style="color: var(--text-muted, #6B6B6B); font-size: 16px;">Your report has been successfully submitted.</p>
+
+            </div>
+
+        </div>
 
         <!-- Comment Modal -->
 
